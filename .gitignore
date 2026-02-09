@@ -1,17 +1,36 @@
 # Freqtrade rules
-config*.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
 logfile.txt
 user_data/*
-!user_data/strategy/sample_strategy.py
+
+# Allow custom strategies
+!user_data/strategies/
+user_data/strategies/__pycache__/
+
+# Allow backtest config (no secrets)
+!user_data/config_btc_vol_adjusted.json
+
+# Allow model files
+!user_data/models/
+user_data/models/__pycache__/
+
+# Allow backtest results (charts only, not data zips)
+!user_data/backtest_results/
+user_data/backtest_results/*.zip
+user_data/backtest_results/*.json
+
+# Keep other defaults ignored
 !user_data/notebooks
-!user_data/models
 !user_data/freqaimodels
 user_data/freqaimodels/*
-user_data/models/*
 user_data/notebooks/*
+
+# SENSITIVE - never commit live config with API keys
+config_btc_vol_adjusted_live.json
+config*.live.json
+*.pem
 freqtrade-plot.html
 freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*

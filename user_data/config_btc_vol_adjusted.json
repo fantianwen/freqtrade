@@ -1,0 +1,104 @@
+{
+    "$schema": "https://schema.freqtrade.io/schema.json",
+    "max_open_trades": 1,
+    "stake_currency": "USDT",
+    "stake_amount": "unlimited",
+    "tradable_balance_ratio": 0.99,
+    "fiat_display_currency": "USD",
+    "dry_run": true,
+    "dry_run_wallet": 1000,
+    "cancel_open_orders_on_exit": true,
+    "trading_mode": "futures",
+    "margin_mode": "isolated",
+    "leverage": 5,
+
+    "timeframe": "1h",
+
+    "strategy": "BTCVolAdjusted",
+    "strategy_path": "user_data/strategies/",
+
+    "minimal_roi": {
+        "0": 100
+    },
+    "stoploss": -0.25,
+
+    "trailing_stop": false,
+
+    "use_exit_signal": true,
+    "exit_profit_only": false,
+    "ignore_roi_if_entry_signal": false,
+
+    "unfilledtimeout": {
+        "entry": 10,
+        "exit": 10,
+        "unit": "minutes"
+    },
+
+    "entry_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+    "exit_pricing": {
+        "price_side": "other",
+        "use_order_book": true,
+        "order_book_top": 1
+    },
+
+    "order_types": {
+        "entry": "market",
+        "exit": "market",
+        "emergency_exit": "market",
+        "force_exit": "market",
+        "force_entry": "market",
+        "stoploss": "market",
+        "stoploss_on_exchange": true,
+        "stoploss_on_exchange_interval": 60
+    },
+
+    "pairlists": [
+        {
+            "method": "StaticPairList"
+        }
+    ],
+
+    "exchange": {
+        "name": "binance",
+        "key": "",
+        "secret": "",
+        "ccxt_config": {},
+        "ccxt_async_config": {},
+        "pair_whitelist": [
+            "BTC/USDT:USDT"
+        ],
+        "pair_blacklist": []
+    },
+
+    "predictor_config": {
+        "direction_model_path": "../volitality-prediction-tool/project/models/regression_model_20260207_204516.pkl",
+        "vol_regression_model_path": "../volitality-prediction-tool/project/models/vol_regression_2h_20260207_214300.pkl",
+        "range_regression_model_path": "../volitality-prediction-tool/project/models/range_regression_2h_20260207_214300.pkl",
+        "vol_classifier_model_path": "../volitality-prediction-tool/project/models/vol_classifier_2h_20260207_214300.pkl"
+    },
+
+    "telegram": {
+        "enabled": false,
+        "token": "",
+        "chat_id": ""
+    },
+
+    "api_server": {
+        "enabled": false,
+        "listen_ip_address": "127.0.0.1",
+        "listen_port": 8083,
+        "username": "freqtrader",
+        "password": "SuperSecurePassword"
+    },
+
+    "bot_name": "BTC_VolAdjusted",
+    "initial_state": "running",
+    "internals": {
+        "process_throttle_secs": 5,
+        "heartbeat_interval": 60
+    }
+}
