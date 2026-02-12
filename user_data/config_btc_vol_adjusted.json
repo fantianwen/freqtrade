@@ -2,8 +2,8 @@
     "$schema": "https://schema.freqtrade.io/schema.json",
     "max_open_trades": 1,
     "stake_currency": "USDT",
-    "stake_amount": "unlimited",
-    "tradable_balance_ratio": 0.99,
+    "stake_amount": 1000,
+    "tradable_balance_ratio": 1.0,
     "fiat_display_currency": "USD",
     "dry_run": true,
     "dry_run_wallet": 1000,
@@ -75,10 +75,10 @@
     },
 
     "predictor_config": {
-        "direction_model_path": "../volitality-prediction-tool/project/models/regression_model_20260207_204516.pkl",
-        "vol_regression_model_path": "../volitality-prediction-tool/project/models/vol_regression_2h_20260207_214300.pkl",
-        "range_regression_model_path": "../volitality-prediction-tool/project/models/range_regression_2h_20260207_214300.pkl",
-        "vol_classifier_model_path": "../volitality-prediction-tool/project/models/vol_classifier_2h_20260207_214300.pkl"
+        "direction_model_path": "../volitality-prediction-tool/project/models/regression_model_20260211_230145.pkl",
+        "vol_regression_model_path": "../volitality-prediction-tool/project/models/vol_regression_2h_20260211_231704.pkl",
+        "range_regression_model_path": "../volitality-prediction-tool/project/models/range_regression_2h_20260211_231704.pkl",
+        "vol_classifier_model_path": "../volitality-prediction-tool/project/models/vol_classifier_2h_20260211_231704.pkl"
     },
 
     "telegram": {

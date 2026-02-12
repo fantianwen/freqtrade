@@ -1,0 +1,38 @@
+{
+  "strategy_name": "BTCVolAdjustedV2",
+  "params": {
+    "roi": {
+      "0": 100
+    },
+    "stoploss": {
+      "stoploss": -0.25
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {
+      "boundary_4h_boost": 1.44,
+      "confidence_floor": 0.79,
+      "confidence_scale": 1.4,
+      "entry_pred_threshold": 1,
+      "entry_range_threshold": 1,
+      "entry_vzo_threshold": 1,
+      "highvol_size_mult": 0.96
+    },
+    "sell": {
+      "exit_flip_threshold": 0.33,
+      "exit_sideways_count": 2,
+      "exit_sideways_threshold": 0.62,
+      "sl_min_price_pct": 2.9
+    },
+    "protection": {}
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-02-11 17:17:49.591556+00:00"
+}

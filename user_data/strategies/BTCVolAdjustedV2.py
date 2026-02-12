@@ -1,6 +1,6 @@
 """
-BTC Volatility-Adjusted Directional Strategy
-==============================================
+BTC Volatility-Adjusted Directional Strategy V2
+=================================================
 
 Combines 4 ML models for intelligent trading:
   1. Direction model    – predicts price change % over ~20h
@@ -16,7 +16,7 @@ Usage:
     freqtrade download-data --config user_data/config_btc_vol_adjusted.json \
         --timeframes 5m 15m 30m 1h 4h --timerange 20240101- --trading-mode futures
 
-    freqtrade backtesting --strategy BTCVolAdjusted \
+    freqtrade backtesting --strategy BTCVolAdjustedV2 \
         --config user_data/config_btc_vol_adjusted.json \
         --timerange 20240601-20260201 --export trades
 """
@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 from pandas import DataFrame
 
+from freqtrade.enums import RunMode
 from freqtrade.persistence import Trade
 from freqtrade.strategy import (
     DecimalParameter,
@@ -168,7 +169,7 @@ def calculate_vzo_slope(vzo, lookback=5):
 # =====================================================================
 
 
-class BTCVolAdjusted(IStrategy):
+class BTCVolAdjustedV2(IStrategy):
     """
     Volatility-adjusted directional strategy.
     Base timeframe: 1h (aligned with model training).
@@ -193,7 +194,17 @@ class BTCVolAdjusted(IStrategy):
     exit_profit_only = False
     process_only_new_candles = True
 
-    startup_candle_count = 200
+    startup_candle_count = 1500
+
+    # Match the exchange candle limit so backtest uses the same data window as live
+    LIVE_WINDOW_1H = 1500
+    # Proportional caps for informative timeframes
+    TF_WINDOW = {
+        "5m": 1500 * 12,   # 18000
+        "15m": 1500 * 4,   # 6000
+        "30m": 1500 * 2,   # 3000
+        "4h": 1500 // 4,   # 375
+    }
 
     # ── Hyperopt parameters ──
 
@@ -666,15 +677,31 @@ class BTCVolAdjusted(IStrategy):
         return feat
 
     # ================================================================
-    # Build full feature matrix + run all models
+    # Core prediction on a single data window
     # ================================================================
 
-    def _build_features_and_predict(
+    # Columns produced by _single_window_core
+    _ML_COLS = [
+        "ml_direction",
+        "ml_vol_regression",
+        "ml_range_regression",
+        "ml_vol_classifier",
+        "ml_vol_prob",
+        "ml_pred_pct",
+        "ml_range_pct",
+        "ml_vol_class",
+        "ml_vzo_consensus",
+        "ml_is_4h",
+    ]
+
+    def _single_window_core(
         self, df_1h: DataFrame, df_dict: Dict[str, DataFrame]
     ) -> DataFrame:
         """
-        Build features for every 1h candle, run all 4 models.
-        Returns df_1h with prediction columns added.
+        Build features and run ML predictions on a single data window.
+        This mirrors exactly what the live bot sees: a fixed-size chunk of
+        candles for each timeframe.
+        Returns df_1h with all ml_ prediction columns added.
         """
         ALL_TFS = ["5m", "15m", "30m", "1h", "4h"]
 
@@ -773,9 +800,7 @@ class BTCVolAdjusted(IStrategy):
             try:
                 X = feat_df.reindex(columns=m["feature_names"], fill_value=0)
                 X = X.fillna(0).replace([np.inf, -np.inf], 0)
-                # Apply training cleaning params (median fill, clip, drop constant)
                 X = self._apply_cleaning_params(X, m.get("cleaning_params"))
-                # Re-align columns after cleaning (some may have been dropped)
                 X = X.reindex(columns=m["feature_names"], fill_value=0)
                 if m["scaler"] is not None:
                     X_sc = pd.DataFrame(
@@ -797,9 +822,7 @@ class BTCVolAdjusted(IStrategy):
                 m = self._models["vol_classifier"]
                 X = feat_df.reindex(columns=m["feature_names"], fill_value=0)
                 X = X.fillna(0).replace([np.inf, -np.inf], 0)
-                # Apply training cleaning params (median fill, clip, drop constant)
                 X = self._apply_cleaning_params(X, m.get("cleaning_params"))
-                # Re-align columns after cleaning (some may have been dropped)
                 X = X.reindex(columns=m["feature_names"], fill_value=0)
                 if m["scaler"] is not None:
                     X_sc = pd.DataFrame(
@@ -810,7 +833,6 @@ class BTCVolAdjusted(IStrategy):
                 else:
                     X_sc = X
                 proba = m["model"].predict_proba(X_sc)
-                # Probability of the predicted class
                 pred_cls = df_1h["ml_vol_classifier"].values.astype(int)
                 df_1h["ml_vol_prob"] = [proba[i, c] for i, c in enumerate(pred_cls)]
             except Exception as e:
@@ -837,7 +859,146 @@ class BTCVolAdjusted(IStrategy):
         # 4h boundary flag
         df_1h["ml_is_4h"] = (pd.to_datetime(df_1h["date"]).dt.hour % 4 == 0).astype(int)
 
-        # ── Freeze predictions: cache once, never overwrite ──
+        return df_1h
+
+    # ================================================================
+    # Cap informative dataframes to match live data window
+    # ================================================================
+
+    def _cap_informative(
+        self, df_dict: Dict[str, DataFrame], end_date
+    ) -> Dict[str, DataFrame]:
+        """
+        Truncate informative timeframe dataframes so they contain at most
+        TF_WINDOW[tf] candles up to end_date — matching what the exchange
+        would provide in live mode.
+        """
+        capped: Dict[str, DataFrame] = {}
+        for tf, df in df_dict.items():
+            cap = self.TF_WINDOW.get(tf, len(df))
+            # Only keep data up to end_date
+            if end_date is not None:
+                mask = df["date"] <= end_date
+                df = df[mask]
+            # Trim to the last `cap` candles
+            if len(df) > cap:
+                df = df.iloc[-cap:]
+            capped[tf] = df.copy()
+        return capped
+
+    # ================================================================
+    # Sliding-window prediction for backtest alignment with live
+    # ================================================================
+
+    _SLIDING_STEP = 200  # advance by 200 candles per window
+
+    def _sliding_window_core(
+        self, df_1h: DataFrame, df_dict: Dict[str, DataFrame]
+    ) -> DataFrame:
+        """
+        Process predictions in overlapping sliding windows of LIVE_WINDOW_1H
+        candles, so each candle is predicted with the same lookback the live
+        bot would have.  Only the newest _SLIDING_STEP rows from each window
+        are kept (the rest are warmup).
+        """
+        W = self.LIVE_WINDOW_1H
+        STEP = self._SLIDING_STEP
+        n = len(df_1h)
+
+        # Pre-allocate ml columns with zeros
+        for col in self._ML_COLS:
+            df_1h[col] = 0.0
+        df_1h["ml_dir_label"] = "Sideways"
+
+        total_windows = (max(0, n - W) // STEP) + 1
+        logger.info(
+            f"Sliding-window prediction: {n} candles, "
+            f"window={W}, step={STEP}, ~{total_windows} windows"
+        )
+
+        processed = 0
+        # Build list of end-positions; ensure the last one covers all candles
+        end_positions = list(range(min(W, n), n, STEP))
+        if not end_positions or end_positions[-1] < n:
+            end_positions.append(n)
+
+        # Iterate: `new_end` is the exclusive upper bound of "new" rows
+        for new_end in end_positions:
+            win_start = max(0, new_end - W)
+            new_start = max(win_start, new_end - STEP)
+            # For the very first window, everything is "new"
+            if processed == 0:
+                new_start = win_start
+
+            # Slice the 1h window (copy to avoid modifying original)
+            window_1h = df_1h.iloc[win_start:new_end][
+                [c for c in df_1h.columns if c not in self._ML_COLS and c != "ml_dir_label"]
+            ].copy()
+
+            # Cap informative data to match this window's end date
+            end_date = window_1h["date"].iloc[-1]
+            window_dict = self._cap_informative(df_dict, end_date)
+
+            # Run core prediction on this window
+            result = self._single_window_core(window_1h, window_dict)
+
+            # Copy only the "new" rows' predictions back to the original df
+            # new_start..new_end in the original df corresponds to
+            # (new_start - win_start)..(new_end - win_start) in the result
+            result_offset = new_start - win_start
+            result_len = new_end - new_start
+            for col in self._ML_COLS:
+                if col in result.columns:
+                    df_1h.iloc[
+                        new_start:new_end,
+                        df_1h.columns.get_loc(col),
+                    ] = result[col].iloc[result_offset : result_offset + result_len].values
+            if "ml_dir_label" in result.columns:
+                df_1h.iloc[
+                    new_start:new_end,
+                    df_1h.columns.get_loc("ml_dir_label"),
+                ] = result["ml_dir_label"].iloc[result_offset : result_offset + result_len].values
+
+            processed += result_len
+
+        logger.info(f"Sliding-window prediction complete: {processed}/{n} candles processed")
+        return df_1h
+
+    # ================================================================
+    # Build full feature matrix + run all models (dispatcher)
+    # ================================================================
+
+    def _build_features_and_predict(
+        self, df_1h: DataFrame, df_dict: Dict[str, DataFrame]
+    ) -> DataFrame:
+        """
+        Build features for every 1h candle, run all 4 models.
+        Returns df_1h with prediction columns added.
+
+        Automatically chooses between:
+        - Single-window mode (live / short backtests): fast, one pass
+        - Sliding-window mode (long backtests): slower but matches live
+          data window exactly for each candle
+        """
+        # ── Part 1: Core predictions ──
+        # Detect backtesting vs live using Freqtrade's RunMode
+        is_backtest = False
+        try:
+            if self.dp and hasattr(self.dp, "runmode"):
+                is_backtest = self.dp.runmode in (RunMode.BACKTEST, RunMode.HYPEROPT)
+        except Exception:
+            pass
+
+        if is_backtest and len(df_1h) > self.LIVE_WINDOW_1H:
+            logger.info(
+                f"Backtest mode: {len(df_1h)} candles. "
+                f"Using sliding-window prediction for live alignment."
+            )
+            df_1h = self._sliding_window_core(df_1h, df_dict)
+        else:
+            df_1h = self._single_window_core(df_1h, df_dict)
+
+        # ── Part 2: Freeze predictions (cache) ──
         # In live mode, populate_indicators re-runs on ALL rows each candle.
         # Sub-timeframe merge_asof can shift older rows' features when new
         # data arrives, causing predictions to change retroactively.
@@ -854,7 +1015,6 @@ class BTCVolAdjusted(IStrategy):
             "ml_vzo_consensus",
         ]
         if self._prediction_cache:
-            # Restore cached predictions for all previously-seen candles
             dates = pd.to_datetime(df_1h["date"]).astype(str)
             for idx, dt_str in dates.items():
                 if dt_str in self._prediction_cache:
@@ -862,7 +1022,6 @@ class BTCVolAdjusted(IStrategy):
                         if col in self._prediction_cache[dt_str]:
                             df_1h.at[idx, col] = self._prediction_cache[dt_str][col]
 
-        # Cache ALL candles' predictions (first time each candle is seen)
         if len(df_1h) > 0:
             dates = pd.to_datetime(df_1h["date"]).astype(str)
             new_cached = 0
@@ -873,7 +1032,6 @@ class BTCVolAdjusted(IStrategy):
                     }
                     new_cached += 1
 
-            # Log the latest candle's cached prediction
             last_idx = df_1h.index[-1]
             last_dt_str = str(pd.to_datetime(df_1h.at[last_idx, "date"]))
             if new_cached > 0:
@@ -883,18 +1041,16 @@ class BTCVolAdjusted(IStrategy):
                     f"range={self._prediction_cache[last_dt_str].get('ml_range_pct', 0):.4f}"
                 )
 
-            # Limit cache size to last 2000 candles (~83 days)
             if len(self._prediction_cache) > 2000:
                 oldest_keys = sorted(self._prediction_cache.keys())[:-2000]
                 for k in oldest_keys:
                     del self._prediction_cache[k]
 
-        # Update derived label after cache restore
+        # ── Part 3: Derived / shifted columns ──
         df_1h["ml_dir_label"] = "Sideways"
         df_1h.loc[df_1h["ml_pred_pct"] > 0.5, "ml_dir_label"] = "Bullish"
         df_1h.loc[df_1h["ml_pred_pct"] < -0.5, "ml_dir_label"] = "Bearish"
 
-        # Previous predictions (for consecutive sideways exit — up to max exit_sideways_count)
         for shift_i in range(1, 5):
             df_1h[f"ml_pred_pct_prev{shift_i}"] = df_1h["ml_pred_pct"].shift(shift_i).fillna(0)
 
@@ -907,7 +1063,7 @@ class BTCVolAdjusted(IStrategy):
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         pair = metadata["pair"]
         logger.info(
-            f"BTCVolAdjusted: populating indicators for {pair}, "
+            f"BTCVolAdjustedV2: populating indicators for {pair}, "
             f"{len(dataframe)} candles @ {self.timeframe}"
         )
 
@@ -1071,6 +1227,40 @@ class BTCVolAdjusted(IStrategy):
         return dataframe
 
     # ================================================================
+    # Helper: get the signal candle row from the analyzed dataframe
+    # ================================================================
+
+    def _get_signal_candle(self, pair: str, current_time) -> Optional[pd.Series]:
+        """
+        Retrieve the signal candle (the last CLOSED candle that generated
+        the entry/exit signal).
+
+        In backtesting, get_analyzed_dataframe().iloc[-1] points to the
+        CURRENT candle (the one being processed), not the signal candle.
+        The signal candle is 1 timeframe period earlier.
+
+        In live mode, iloc[-1] IS the signal candle (latest closed candle).
+
+        This method looks up the candle by date to work correctly in both
+        modes: it finds the candle whose date == current_time - 1h.
+        If that exact match isn't found (live mode), falls back to iloc[-1].
+        """
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if dataframe is None or len(dataframe) == 0:
+            return None
+
+        # Signal candle = 1h before current_time
+        signal_time = pd.Timestamp(current_time) - pd.Timedelta(hours=1)
+        matches = dataframe.loc[
+            pd.to_datetime(dataframe["date"]).dt.tz_localize(None) == signal_time.tz_localize(None)
+        ]
+        if len(matches) > 0:
+            return matches.iloc[-1]
+
+        # Fallback: use iloc[-1] (correct in live mode)
+        return dataframe.iloc[-1]
+
+    # ================================================================
     # Confirm trade entry (safety net for live/dry-run)
     # ================================================================
 
@@ -1093,12 +1283,10 @@ class BTCVolAdjusted(IStrategy):
         This callback checks the frozen (cached) prediction still
         passes the entry thresholds.
         """
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        if dataframe is None or len(dataframe) == 0:
+        last = self._get_signal_candle(pair, current_time)
+        if last is None:
             logger.warning("confirm_trade_entry: no dataframe — rejecting")
             return False
-
-        last = dataframe.iloc[-1]
         pred = float(last.get("ml_pred_pct", 0))
         rng = float(last.get("ml_range_pct", 0))
         vzo = int(last.get("ml_vzo_consensus", 0))
@@ -1148,11 +1336,9 @@ class BTCVolAdjusted(IStrategy):
         At 5x leverage, 1% price move = 5% profit change,
         so SL = -(range_pct / 100) * leverage.
         """
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        if dataframe is None or len(dataframe) == 0:
+        last = self._get_signal_candle(pair, current_time)
+        if last is None:
             return self.stoploss
-
-        last = dataframe.iloc[-1]
         range_pct = float(last.get("ml_range_pct", 1.0))
         lev = trade.leverage or 1.0
 
@@ -1206,11 +1392,9 @@ class BTCVolAdjusted(IStrategy):
         - 4h boundary (1.25x boost)
         - Direction confidence (scale by prediction magnitude)
         """
-        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        if dataframe is None or len(dataframe) == 0:
+        last = self._get_signal_candle(pair, current_time)
+        if last is None:
             return proposed_stake
-
-        last = dataframe.iloc[-1]
 
         base = proposed_stake
 
